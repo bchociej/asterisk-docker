@@ -12,6 +12,8 @@ are no upstream sample configs, guest accounts, voicemail, trunks or web service
 
 ## Build and test
 
+Install the Python development dependencies below before running the image test.
+
 ```sh
 docker build --pull -t local/asterisk:alpine-3.24 .
 ./scripts/test-image.sh
@@ -107,3 +109,39 @@ SIP configuration and credentials. Keep site-specific files in the ignored paths
 tracked configuration files are public defaults. Never use `git add -f` to add
 private deployment files. Before publishing changes, inspect `git diff --cached`
 and `git status --ignored`. Gitignore does not remove previously committed data.
+
+## Development checks
+
+Use Python 3.12 or newer, pytest for Python tests, Ruff for Python lint/format,
+and Bats plus ShellCheck for shell tests/lint. The shell scripts remain POSIX
+`sh`; Bats tests use Bash. On Debian/Ubuntu, install the system tools with:
+
+```sh
+sudo apt-get install python3-venv bats shellcheck
+python3 -m venv .venv
+. .venv/bin/activate
+python -m pip install -r requirements-dev.txt
+```
+
+Run the same checks as CI:
+
+```sh
+ruff check .
+ruff format --check .
+python -m pytest -m 'not integration'
+shellcheck scripts/*.sh tests/shell/*.bats
+bats tests/shell
+```
+
+Use `ruff format .` to format Python and `ruff check --fix .` for safe lint fixes.
+The Python tests cover credential generation, invalid inputs, and overwrite
+protection. Bats covers launcher behavior, health-check failures, and smoke-test
+cleanup using mocks, without starting Docker or contacting ATAs.
+
+The SIP/RTP test uses pytest too. `./scripts/test-image.sh` starts a disposable
+container from an already-built image and passes its address and credentials to
+the integration test. A normal `pytest` run skips it unless both `--pbx-host` and
+`--pbx-config` are supplied; use the wrapper to avoid targeting a real PBX.
+
+GitHub Actions runs linting, formatting checks, and local tests on pushes and
+pull requests. It does not build an image or run the Docker integration test.
