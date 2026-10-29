@@ -16,7 +16,7 @@ import pytest
 def test_registration_and_rtp_echo(pbx):
     host, config = pbx
     accounts = re.findall(
-        r"username = (\d+)\npassword = (\w+)", Path(config).read_text()
+        r"username = ([a-z0-9_-]+)\npassword = (\w+)", Path(config).read_text()
     )
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     sock.connect((host, 5060))

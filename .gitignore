@@ -51,3 +51,6 @@ __pycache__/
 
 .pytest_cache/
 .ruff_cache/
+
+# Private device inventory (secrets are stored separately in /secrets/)
+/inventory/

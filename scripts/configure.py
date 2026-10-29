@@ -1,51 +1,115 @@
 #!/usr/bin/env python3
-"""Generate private SIP accounts without putting passwords in the image or Git."""
+"""Manage a private phone inventory, separate secrets, and generated PBX config."""
 
 import argparse
+import fcntl
 import ipaddress
+import json
 import os
+import re
 import secrets
+import tempfile
 from pathlib import Path
 
-parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument(
-    "--bind",
-    type=ipaddress.IPv4Address,
-    required=True,
-    help="Private IPv4 address on the PBX host (not 0.0.0.0)",
-)
-parser.add_argument(
-    "--extensions",
-    nargs="+",
-    default=["1001", "1002"],
-    help="Unique four-digit extension numbers",
-)
-args = parser.parse_args()
-address = args.bind
-if (
-    address.is_unspecified
-    or address.is_multicast
-    or address.is_loopback
-    or not address.is_private
-):
-    parser.error("--bind must be a reachable private unicast IPv4 address")
-if len(set(args.extensions)) != len(args.extensions) or any(
-    len(x) != 4 or not x.isascii() or not x.isdigit() or x == "6000"
-    for x in args.extensions
-):
-    parser.error("Use unique four-digit extensions; 6000 is reserved for the echo test")
-root = Path(__file__).resolve().parent.parent
-paths = [
-    root / "config/pjsip.conf",
-    root / "config/extensions.conf",
-    root / "credentials.txt",
-]
-if any(p.exists() for p in paths):
-    parser.error(
-        "Generated files already exist; back them up and remove them before regenerating credentials"
-    )
-accounts = {x: secrets.token_hex(24) for x in args.extensions}
-pjsip = f"""[global]
+ROOT = Path(__file__).resolve().parent.parent
+INVENTORY = ROOT / "inventory/devices.json"
+SECRETS = ROOT / "secrets/phones.json"
+
+
+def private_address(value):
+    address = ipaddress.IPv4Address(value)
+    if (
+        address.is_unspecified
+        or address.is_multicast
+        or address.is_loopback
+        or not address.is_private
+    ):
+        raise ValueError("Bind must be a reachable private unicast IPv4 address")
+    return str(address)
+
+
+def validate(inventory, passwords):
+    if inventory.get("version") != 1 or not isinstance(inventory.get("devices"), dict):
+        raise ValueError("Unsupported inventory format")
+    private_address(inventory["bind"])
+    extensions, usernames = set(), set()
+    for device, phone in inventory["devices"].items():
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", device):
+            raise ValueError(
+                "Device IDs must contain lowercase letters, digits, underscores or hyphens"
+            )
+        extension = phone["extension"]
+        if not re.fullmatch(r"[0-9]{4}", extension) or extension == "6000":
+            raise ValueError(
+                "Use four-digit extensions; 6000 is reserved for the echo test"
+            )
+        if extension in extensions:
+            raise ValueError("Extension is already assigned to another device")
+        extensions.add(extension)
+        username = phone["sip_username"]
+        if (
+            not (username == f"phone-{device}" or re.fullmatch(r"[0-9]{4}", username))
+            or username in usernames
+        ):
+            raise ValueError("Invalid or duplicate SIP username")
+        usernames.add(username)
+        if not isinstance(phone["enabled"], bool):
+            raise ValueError("Device enabled must be true or false")
+        if not isinstance(phone["name"], str) or not re.fullmatch(
+            r"[A-Za-z0-9 _.-]{1,64}", phone["name"]
+        ):
+            raise ValueError(
+                "Display names must be 1–64 ASCII letters, digits, spaces, periods, underscores or hyphens"
+            )
+        if not re.fullmatch(r"[A-Za-z0-9]{16,128}", passwords.get(device, "")):
+            raise ValueError(
+                "Missing or invalid device secret; restore the secret store, do not regenerate it"
+            )
+
+
+def atomic_write(path, content, mode):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(prefix=".configure-", dir=path.parent)
+    try:
+        os.fchmod(fd, mode)
+        with os.fdopen(fd, "w") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+
+
+def save(inventory, passwords):
+    validate(inventory, passwords)
+    SECRETS.parent.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(SECRETS.parent, 0o700)
+    # Secrets first: an interrupted save may leave an unused secret, but must
+    # never publish an inventory entry whose password has not been saved.
+    atomic_write(SECRETS, json.dumps(passwords, indent=2) + "\n", 0o600)
+    atomic_write(INVENTORY, json.dumps(inventory, indent=2) + "\n", 0o600)
+
+
+def load():
+    try:
+        inventory = json.loads(INVENTORY.read_text())
+        passwords = json.loads(SECRETS.read_text())
+        if not isinstance(inventory, dict) or not isinstance(passwords, dict):
+            raise ValueError("Inventory and secrets must be JSON objects")
+        validate(inventory, passwords)
+        return inventory, passwords
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Inventory or secrets missing; initialize once, or restore both from backup"
+        ) from error
+
+
+def render(inventory, passwords):
+    validate(inventory, passwords)
+    address = inventory["bind"]
+    pjsip = f""" ; Generated by scripts/configure.py; edit the private inventory instead.
+[global]
 type = global
 endpoint_identifier_order = username
 
@@ -66,44 +130,226 @@ force_rport = yes
 rewrite_contact = yes
 rtp_symmetric = yes
 allow_subscribe = no
-"""
-for extension, password in accounts.items():
-    pjsip += f"""
-[{extension}](phone)
-auth = auth-{extension}
-aors = {extension}
-callerid = Phone {extension} <{extension}>
+""".lstrip()
+    dialplan = "; Generated by scripts/configure.py\n[general]\nstatic = yes\nwriteprotect = yes\n\n[phones]\n"
+    credentials = f"Primary SIP server: {address}\nSIP transport: UDP, port 5060\nCodec: PCMU; DTMF: RFC2833\n\n"
+    for device, phone in sorted(inventory["devices"].items()):
+        if not phone["enabled"]:
+            continue
+        extension, username, name = (
+            phone["extension"],
+            phone["sip_username"],
+            phone["name"],
+        )
+        password = passwords[device]
+        pjsip += f"""
+[{username}](phone)
+auth = auth-{username}
+aors = {username}
+callerid = {name} <{extension}>
 
-[auth-{extension}]
+[auth-{username}]
 type = auth
 auth_type = userpass
-username = {extension}
+username = {username}
 password = {password}
 
-[{extension}]
+[{username}]
 type = aor
 max_contacts = 1
 remove_existing = yes
 qualify_frequency = 30
 """
-dialplan = "[general]\nstatic = yes\nwriteprotect = yes\n\n[phones]\n"
-for extension in accounts:
-    dialplan += (
-        f"exten => {extension},1,Dial(PJSIP/{extension},30)\n same => n,Hangup()\n"
+        dialplan += (
+            f"exten => {extension},1,Dial(PJSIP/{username},30)\n same => n,Hangup()\n"
+        )
+        credentials += f"Device: {device}\nExtension: {extension}\nSIP User ID / Authenticate ID: {username}\nPassword: {password}\n\n"
+    dialplan += "\n; Prompt-free echo test.\nexten => 6000,1,Answer()\n same => n,Echo()\n same => n,Hangup()\n"
+    # Runtime config is readable by the container UID. Keep the repository
+    # private on the host; source inventory/secrets and summary are mode 0600.
+    atomic_write(ROOT / "config/pjsip.conf", pjsip, 0o644)
+    atomic_write(ROOT / "config/extensions.conf", dialplan, 0o644)
+    atomic_write(ROOT / "credentials.txt", credentials, 0o600)
+    print(
+        "Rendered config/pjsip.conf, config/extensions.conf and credentials.txt. No passwords printed."
     )
-dialplan += "\n; Prompt-free echo test: speak and listen for your voice.\nexten => 6000,1,Answer()\n same => n,Echo()\n same => n,Hangup()\n"
-credentials = f"Primary SIP server: {address}\nSIP transport: UDP, port 5060\nCodec: PCMU; DTMF: RFC2833\n\n"
-credentials += "".join(
-    f"Extension / SIP user / Authenticate ID: {x}\nPassword: {p}\n\n"
-    for x, p in accounts.items()
-)
-# Config must be readable by the container's service UID. Keep the credential
-# summary private to the host user; control access to this entire repository.
-for path, content, mode in zip(
-    paths, [pjsip, dialplan, credentials], [0o644, 0o644, 0o600]
-):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
-    with os.fdopen(fd, "w") as f:
-        f.write(content)
-print("Created config/pjsip.conf, config/extensions.conf and credentials.txt")
-print("Passwords are in credentials.txt; they have not been printed.")
+
+
+def initialize(bind, extensions):
+    if (
+        INVENTORY.exists()
+        or SECRETS.exists()
+        or any(
+            (ROOT / p).exists()
+            for p in ("config/pjsip.conf", "config/extensions.conf", "credentials.txt")
+        )
+    ):
+        raise ValueError(
+            "Deployment files already exist; use import-legacy or restore the existing inventory"
+        )
+    inventory = {"version": 1, "bind": private_address(bind), "devices": {}}
+    passwords = {}
+    for extension in extensions:
+        if extension in inventory["devices"]:
+            raise ValueError("Duplicate extension")
+        inventory["devices"][extension] = {
+            "extension": extension,
+            "sip_username": extension,
+            "name": f"Phone {extension}",
+            "enabled": True,
+        }
+        passwords[extension] = secrets.token_hex(24)
+    save(inventory, passwords)
+    return inventory, passwords
+
+
+def import_legacy():
+    if INVENTORY.exists() or SECRETS.exists():
+        raise ValueError(
+            "Inventory or secrets already exist; import will not overwrite them"
+        )
+    config = (ROOT / "config/pjsip.conf").read_text()
+    dialplan = (ROOT / "config/extensions.conf").read_text()
+    bind = re.search(r"^bind\s*=\s*([0-9.]+):5060\s*$", config, re.M)
+    accounts = re.findall(
+        r"^username = ([0-9]{4})\npassword = ([A-Za-z0-9]{16,128})\s*$", config, re.M
+    )
+    mappings = re.findall(
+        r"^exten => ([0-9]{4}),1,Dial\(PJSIP/([0-9]{4}),30\)$", dialplan, re.M
+    )
+    if (
+        not bind
+        or not accounts
+        or len(accounts) != len(mappings)
+        or len(dict(accounts)) != len(accounts)
+    ):
+        raise ValueError("Unsupported legacy configuration; no files changed")
+    extensions = {username: extension for extension, username in mappings}
+    if set(extensions) != set(dict(accounts)):
+        raise ValueError("Legacy endpoints and extension mappings do not match")
+    inventory = {"version": 1, "bind": private_address(bind[1]), "devices": {}}
+    for username, _ in accounts:
+        inventory["devices"][username] = {
+            "extension": extensions[username],
+            "sip_username": username,
+            "name": f"Phone {extensions[username]}",
+            "enabled": True,
+        }
+    save(inventory, dict(accounts))
+    print("Imported legacy accounts without changing credentials or generated files.")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--bind", help="Legacy bootstrap: private PBX IPv4 address")
+    parser.add_argument(
+        "--extensions",
+        nargs="+",
+        default=["1001", "1002"],
+        help="Legacy bootstrap extension numbers",
+    )
+    commands = parser.add_subparsers(dest="command")
+    init = commands.add_parser(
+        "init", help="Create an empty inventory and secret store once"
+    )
+    init.add_argument("--bind", required=True)
+    add = commands.add_parser("add", help="Add a device and generate only its password")
+    add.add_argument("device")
+    add.add_argument("--extension", required=True)
+    add.add_argument("--name")
+    update = commands.add_parser(
+        "update", help="Change a phone without changing its SIP identity/password"
+    )
+    update.add_argument("device")
+    update.add_argument("--extension")
+    update.add_argument("--name")
+    update.add_argument(
+        "--enabled", action=argparse.BooleanOptionalAction, default=None
+    )
+    bind = commands.add_parser("bind", help="Change the PBX private address")
+    bind.add_argument("address")
+    rotate = commands.add_parser(
+        "rotate-password", help="Explicitly replace just this device's password"
+    )
+    rotate.add_argument("device")
+    commands.add_parser(
+        "render", help="Render the current inventory and existing secrets"
+    )
+    commands.add_parser("list", help="List devices without exposing passwords")
+    commands.add_parser(
+        "import-legacy",
+        help="Adopt old generated numeric SIP accounts, preserving passwords",
+    )
+    args = parser.parse_args()
+    if args.command is None and not args.bind:
+        parser.error("Choose a command; see --help")
+    try:
+        INVENTORY.parent.mkdir(mode=0o700, exist_ok=True)
+        os.chmod(INVENTORY.parent, 0o700)
+        with (INVENTORY.parent / ".lock").open("a") as lock:
+            os.chmod(lock.name, 0o600)
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            if args.command in (None, "init"):
+                inventory, passwords = initialize(
+                    args.bind, args.extensions if args.command is None else []
+                )
+                if args.command is None:
+                    render(inventory, passwords)
+                else:
+                    print("Initialized private inventory and separate secret store.")
+                return
+            if args.command == "import-legacy":
+                import_legacy()
+                return
+            inventory, passwords = load()
+            devices = inventory["devices"]
+            if (
+                args.command in ("update", "rotate-password")
+                and args.device not in devices
+            ):
+                raise ValueError("Unknown device")
+            if args.command == "add":
+                if args.device in devices:
+                    raise ValueError("Device already exists; use update")
+                devices[args.device] = {
+                    "extension": args.extension,
+                    "sip_username": f"phone-{args.device}",
+                    "name": args.name or args.device,
+                    "enabled": True,
+                }
+                passwords.setdefault(args.device, secrets.token_hex(24))
+            elif args.command == "update":
+                for field in ("extension", "name", "enabled"):
+                    value = getattr(args, field)
+                    if value is not None:
+                        devices[args.device][field] = value
+            elif args.command == "rotate-password":
+                passwords[args.device] = secrets.token_hex(24)
+            elif args.command == "bind":
+                inventory["bind"] = private_address(args.address)
+            elif args.command == "render":
+                render(inventory, passwords)
+                return
+            elif args.command == "list":
+                for device, phone in sorted(devices.items()):
+                    print(
+                        f"{device}\t{phone['extension']}\t{phone['sip_username']}\t{'enabled' if phone['enabled'] else 'disabled'}\t{phone['name']}"
+                    )
+                return
+            save(inventory, passwords)
+            print(
+                "Saved inventory/secrets. Run 'scripts/configure.py render' to update PBX configuration."
+            )
+    except (ValueError, KeyError, TypeError, AttributeError, OSError) as error:
+        # Never echo malformed private JSON or user-supplied secret values.
+        if isinstance(
+            error, (json.JSONDecodeError, KeyError, TypeError, AttributeError)
+        ):
+            parser.error(
+                "Invalid inventory or secret store; no credentials regenerated"
+            )
+        parser.error(str(error))
+
+
+if __name__ == "__main__":
+    main()

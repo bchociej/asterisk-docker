@@ -21,7 +21,10 @@ cp scripts/configure.py "$config_dir/configure.py"
 mkdir "$config_dir/scripts"
 mv "$config_dir/configure.py" "$config_dir/scripts/configure.py"
 # Only this disposable test binds every interface in its isolated namespace.
-python3 "$config_dir/scripts/configure.py" --bind 192.168.250.1
+python3 "$config_dir/scripts/configure.py" init --bind 192.168.250.1
+python3 "$config_dir/scripts/configure.py" add test-a --extension 1001
+python3 "$config_dir/scripts/configure.py" add test-b --extension 1002
+python3 "$config_dir/scripts/configure.py" render
 sed -i 's/192.168.250.1:5060/0.0.0.0:5060/' "$config_dir/config/pjsip.conf"
 chmod 755 "$config_dir"
 docker run -d --name "$name" --read-only --cap-drop ALL \
@@ -49,6 +52,17 @@ for module in chan_iax2 res_http_websocket res_ari; do
 done
 ip=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' "$name")
 docker exec "$name" asterisk -rx 'manager show settings' | grep -Eq 'Manager \(AMI\):[[:space:]]+No'
+python3 -m pytest -q -m integration tests/test_sip.py \
+    --pbx-host "$ip" --pbx-config "$config_dir/config/pjsip.conf"
+# Re-render a changed extension, then authenticate again with the same secrets.
+cp "$config_dir/secrets/phones.json" "$config_dir/secrets-before.json"
+python3 "$config_dir/scripts/configure.py" update test-a --extension 2001
+python3 "$config_dir/scripts/configure.py" render
+cmp "$config_dir/secrets-before.json" "$config_dir/secrets/phones.json"
+docker exec "$name" asterisk -rx 'module reload res_pjsip.so'
+docker exec "$name" asterisk -rx 'dialplan reload'
+docker exec "$name" asterisk -rx 'pjsip show endpoint phone-test-a' | grep -E 'callerid[[:space:]]+:[[:space:]]+.*<2001>'
+docker exec "$name" asterisk -rx 'dialplan show 2001@phones' | grep -F 'Dial(PJSIP/phone-test-a,30)'
 python3 -m pytest -q -m integration tests/test_sip.py \
     --pbx-host "$ip" --pbx-config "$config_dir/config/pjsip.conf"
 passed=yes

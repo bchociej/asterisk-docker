@@ -24,20 +24,91 @@ ports. It checks non-root read-only startup, endpoints, authenticated SIP
 registration, rejection of incorrect credentials, and a PCMU RTP echo call.
 Real handset calls and cross-site audio still need testing on your network.
 
-## Configure
+## Configure and manage phones
 
-Requires Python 3 on the host. Substitute an actual private IPv4 address **assigned
-to the PBX host**, reachable from both sites. Do not use the example unchanged.
+Requires Python 3.12 or newer on the host. Use a private IPv4 address assigned
+**to the PBX host**, reachable from both sites; replace the example address.
 
 ```sh
-python3 scripts/configure.py --bind 192.168.10.20 --extensions 1001 1002 1003 1004
+python3 scripts/configure.py init --bind 192.168.10.20
+python3 scripts/configure.py add kitchen --extension 1001 --name Kitchen
+python3 scripts/configure.py add office --extension 1002 --name Office
+python3 scripts/configure.py render
 ```
 
-This creates `config/pjsip.conf`, `config/extensions.conf`, and `credentials.txt`.
-They are ignored by Git; passwords/configuration are excluded from image builds.
-The generator refuses to overwrite existing files. Protect the repository on the
-host: PJSIP configuration must be readable by container UID 10001 and contains
-passwords. The separate credential summary is mode 0600.
+The sources of truth are two private, Git-ignored files:
+
+- `inventory/devices.json`: bind address, stable device IDs, display names,
+  extension mappings, enabled state, and SIP usernames. No passwords.
+- `secrets/phones.json`: device ID to SIP password. New passwords are generated
+  only for new devices or an explicit `rotate-password` command.
+
+Both files are mode 0600 in mode 0700 directories. Back up **both** together in
+private storage. If secrets are missing or corrupt, commands fail instead of
+inventing replacement passwords. Commands lock the inventory to prevent concurrent
+updates from losing changes. Writes use atomic file replacement.
+
+`render` combines these stores into `config/pjsip.conf`,
+`config/extensions.conf`, and a private `credentials.txt` provisioning summary.
+It can be repeated without changing passwords. These outputs are generated;
+edit the inventory through the CLI (or JSON) instead of editing outputs, because
+rendering replaces them. Runtime config is mode 0644 so container UID 10001 can
+read it: restrict access to the repository on the host. No source stores or
+credentials are included in the image or tracked by Git.
+
+```sh
+python3 scripts/configure.py list
+python3 scripts/configure.py update kitchen --extension 2001 --name Upstairs
+python3 scripts/configure.py add den --extension 1003
+python3 scripts/configure.py update office --no-enabled
+python3 scripts/configure.py update office --enabled
+python3 scripts/configure.py bind 192.168.10.21
+python3 scripts/configure.py render
+```
+
+Device `kitchen` has SIP username `phone-kitchen`. Its username/password stay
+unchanged when its extension, display name, enabled state, or PBX address changes.
+Each device has one unique four-digit extension; 6000 is reserved for echo testing.
+Disabled devices retain their extension reservation and password but are omitted
+from generated accounts and dialplan. Disabling is applied on PBX reload; it does
+not terminate an already active call.
+
+Edits change the source stores only: batch edits, then render and apply them:
+
+```sh
+docker exec private-asterisk asterisk -rx 'module reload res_pjsip.so'
+docker exec private-asterisk asterisk -rx 'dialplan reload'
+```
+
+Restart the container after changing its SIP bind address. The tool does not
+contact Docker, automatically reload Asterisk, or provision any ATA.
+
+To intentionally change one device's password:
+
+```sh
+python3 scripts/configure.py rotate-password kitchen
+python3 scripts/configure.py render
+```
+
+Apply the reload and update that ATA from `credentials.txt`. Other devices keep
+their passwords. Output on the terminal never prints passwords.
+
+### Adopting configuration from the old generator
+
+For untouched numeric accounts created by the previous tool, first back up the
+existing private files, then run:
+
+```sh
+python3 scripts/configure.py import-legacy
+```
+
+This creates inventory/secrets while preserving SIP usernames and passwords and
+leaves runtime files unchanged. Existing device IDs are their old numeric SIP
+usernames, so `update 1001 --extension 2001` changes the extension while keeping SIP
+username `1001`. Run `render` and reload when ready. Import refuses to overwrite
+existing source stores. Custom hand-written configurations require manual migration.
+The original `--bind ... --extensions ...` bootstrap syntax remains available for
+compatibility; it still refuses to overwrite deployment files.
 
 ## Run (Linux)
 
@@ -69,7 +140,8 @@ Use one deployment method at a time.
 ## Configure each HT801
 
 - Primary SIP Server: the PBX private IP; transport UDP, port 5060.
-- SIP User ID and Authenticate ID: that ATA's extension from `credentials.txt`.
+- SIP User ID and Authenticate ID: that device's SIP username from `credentials.txt`
+  (for example `phone-kitchen`), which is independent of its dialed extension.
 - Authenticate Password: its generated password; SIP registration enabled.
 - Preferred codec PCMU; DTMF via RTP/RFC2833; start with 20 ms packets.
 - Routed LAN/VPN setup: NAT traversal/STUN off initially.
@@ -134,8 +206,8 @@ bats tests/shell
 ```
 
 Use `ruff format .` to format Python and `ruff check --fix .` for safe lint fixes.
-The Python tests cover credential generation, invalid inputs, and overwrite
-protection. Bats covers launcher behavior, health-check failures, and smoke-test
+The Python tests cover account lifecycle, stable credentials and SIP identities,
+legacy migration, missing secrets, invalid inputs, and overwrite protection. Bats covers launcher behavior, health-check failures, and smoke-test
 cleanup using mocks, without starting Docker or contacting ATAs.
 
 The SIP/RTP test uses pytest too. `./scripts/test-image.sh` starts a disposable
