@@ -1,8 +1,7 @@
 # Private Asterisk on Alpine
 
 Asterisk **22.11.0 LTS** on **Alpine 3.24**, for calls between analog phones on
-Grandstream ATAs across two privately routed LANs/WireGuard. One PBX serves both
-sites. G.711 µ-law, UDP SIP, RTP 10000–10099, authenticated extensions only.
+Grandstream ATAs on private networks, including routed VPN deployments. G.711 µ-law, UDP SIP, RTP 10000–10099, authenticated extensions only.
 
 The image builds checksum-verified upstream source because Alpine stable's
 packaged 22.9.0 does not include the later security fixes. The build uses Alpine's
@@ -15,8 +14,8 @@ are no upstream sample configs, guest accounts, voicemail, trunks or web service
 Install the Python development dependencies below before running the image test.
 
 ```sh
-docker build --pull -t local/asterisk:alpine-3.24 .
-./scripts/test-image.sh
+docker build --pull --platform linux/amd64 -f container/Dockerfile -t local/asterisk:alpine-3.24 .
+uv run --locked scripts/test-image.sh
 ```
 
 The test uses disposable credentials and an isolated container without publishing
@@ -127,8 +126,8 @@ SIP/RTP on each local LAN remains unencrypted.
 With the Docker Compose plugin installed:
 
 ```sh
-docker compose up -d
-docker compose logs -f
+docker compose -p private-asterisk -f deploy/compose/compose.yaml up -d
+docker compose -p private-asterisk -f deploy/compose/compose.yaml logs -f
 ```
 
 If the Compose plugin is unavailable, `./scripts/run.sh` provides the
@@ -156,7 +155,7 @@ docker exec private-asterisk asterisk -rx 'pjsip show contacts'
 docker exec private-asterisk asterisk -rx 'core reload'
 ```
 
-For Compose use `docker compose exec asterisk ...` instead. Restart after changing
+For Compose use `docker compose -p private-asterisk -f deploy/compose/compose.yaml exec asterisk ...` instead. Restart after changing
 the transport bind address; reloading alone does not apply transport changes.
 There are no sound files; install a reviewed sound package if adding prompts.
 
@@ -189,31 +188,56 @@ and Bats plus ShellCheck for shell tests/lint. The shell scripts remain POSIX
 `sh`; Bats tests use Bash. On Debian/Ubuntu, install the system tools with:
 
 ```sh
-sudo apt-get install python3-venv bats shellcheck
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install -r requirements-dev.txt
+sudo apt-get install bats shellcheck
+# Install uv using its official installation instructions.
+uv sync --locked --python 3.12
 ```
 
 Run the same checks as CI:
 
 ```sh
-ruff check .
-ruff format --check .
-python -m pytest -m 'not integration'
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+uv run --locked python -m pytest -m 'not integration'
 shellcheck scripts/*.sh tests/shell/*.bats
 bats tests/shell
 ```
 
-Use `ruff format .` to format Python and `ruff check --fix .` for safe lint fixes.
+Use `uv run --locked ruff format .` to format Python and
+`uv run --locked ruff check --fix .` for safe lint fixes. Development dependencies
+are locked in `uv.lock`; update them deliberately with uv and commit the lockfile.
+The host-side runtime helpers still need only Python's standard library.
 The Python tests cover account lifecycle, stable credentials and SIP identities,
 legacy migration, missing secrets, invalid inputs, and overwrite protection. Bats covers launcher behavior, health-check failures, and smoke-test
-cleanup using mocks, without starting Docker or contacting ATAs.
+cleanup using mocks, without starting Docker or contacting ATAs. Snapshot tests
+check integrity, immutability and that source inputs are left unchanged.
 
-The SIP/RTP test uses pytest too. `./scripts/test-image.sh` starts a disposable
+The SIP/RTP test uses pytest too. `uv run --locked scripts/test-image.sh` starts a disposable
 container from an already-built image and passes its address and credentials to
 the integration test. A normal `pytest` run skips it unless both `--pbx-host` and
 `--pbx-config` are supplied; use the wrapper to avoid targeting a real PBX.
 
 GitHub Actions runs linting, formatting checks, and local tests on pushes and
 pull requests. It does not build an image or run the Docker integration test.
+
+## Production deployment and recovery
+
+The quick-start commands above are for development. For coherent immutable input
+snapshots, pinned image selection, offline preflight, activation, verification,
+backups and paired rollback, follow [deployment instructions](docs/deployment.md).
+No production deployment, Kubernetes support or image publication is implied.
+Install uv using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/).
+
+## Applied standards
+
+Standards source: [bchociej/dev-standards](https://github.com/bchociej/dev-standards).
+
+| Standard | Version spec | Resolved version | Source ref and path | Status |
+| --- | --- | --- | --- | --- |
+| BAS-001 | ^5.0.0 | 5.0.0 | [`894bf01:bas-001-repository-and-development-fundamentals.md`](https://github.com/bchociej/dev-standards/blob/894bf013623224066a3a99ed1d9f14c2b1bd7c67/bas-001-repository-and-development-fundamentals.md) | Adopted; see notes |
+| BAS-002 | ^3.0.0 | 3.0.0 | [`894bf01:bas-002-recording-standards-adoption.md`](https://github.com/bchociej/dev-standards/blob/894bf013623224066a3a99ed1d9f14c2b1bd7c67/bas-002-recording-standards-adoption.md) | Adopted; see notes |
+| CAS-001 | ^4.0.0 | 4.0.0 | [`894bf01:cas-001-container-application-repositories.md`](https://github.com/bchociej/dev-standards/blob/894bf013623224066a3a99ed1d9f14c2b1bd7c67/cas-001-container-application-repositories.md) | Adopted; see notes |
+
+See [adoption notes](docs/standards.md) for the assessment, documented departures,
+verification and limitations. Matching future versions are candidates for review,
+not permission for automatic upgrades.

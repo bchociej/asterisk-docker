@@ -76,7 +76,7 @@ def test_registration_and_rtp_echo(pbx):
             + ("authenticated registration" if good else "wrong password rejected")
         )
 
-    assert len(accounts) == 2, "Expected two disposable test accounts"
+    assert accounts, "Expected at least one enabled account in the disposable test PBX"
     for user, password in accounts:
         register(user, password)
     register(accounts[0][0], "incorrect-password", False)

@@ -54,3 +54,6 @@ __pycache__/
 
 # Private device inventory (secrets are stored separately in /secrets/)
 /inventory/
+
+# Private deployment snapshots and immutable release metadata
+/releases/
