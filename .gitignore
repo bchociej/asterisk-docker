@@ -1,0 +1,50 @@
+# Generated deployment configuration and SIP credentials
+/config/pjsip.conf
+/config/extensions.conf
+credentials*.txt
+/config/*local*.conf
+/config/keys/
+/config/tls/
+/secrets/
+
+# Environment, deployment overrides, and private key material
+.env
+.env.*
+!.env.example
+compose.override.yml
+compose.override.yaml
+docker-compose.override.yml
+docker-compose.override.yaml
+*.key
+*.pem
+*.p12
+*.pfx
+id_rsa*
+id_ed25519*
+wg*.conf
+
+# Runtime state, recordings, traces, image exports, and backups
+/data/
+/logs/
+/recordings/
+/backups/
+*.log
+*.pcap
+*.pcapng
+*.wav
+*.gsm
+*.sqlite*
+*.db
+*.tar
+*.tar.gz
+*.tgz
+*.bak
+*~
+
+# Python and editor artifacts
+__pycache__/
+*.py[cod]
+.venv/
+*.swp
+*.swo
+.DS_Store

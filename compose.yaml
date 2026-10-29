@@ -1,0 +1,27 @@
+services:
+  asterisk:
+    build: .
+    image: local/asterisk:alpine-3.24
+    network_mode: host
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - ./config:/etc/asterisk:ro
+      - asterisk-data:/var/lib/asterisk
+    tmpfs:
+      - /run/asterisk:uid=10001,gid=10001,mode=0750
+      - /var/spool/asterisk:uid=10001,gid=10001,mode=0750
+      - /var/log/asterisk:uid=10001,gid=10001,mode=0750
+      - /tmp:mode=1777
+    restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  asterisk-data:

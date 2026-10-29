@@ -1,0 +1,10 @@
+**
+!Dockerfile
+!config/
+!config/*.conf
+config/pjsip.conf
+config/extensions.conf
+!scripts/
+!scripts/healthcheck.sh
+!patches/
+!patches/*.patch
