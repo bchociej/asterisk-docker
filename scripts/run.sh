@@ -1,9 +1,10 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-[ -s config/pjsip.conf ] && [ -s config/extensions.conf ] || {
-    echo 'Run scripts/configure.py with the PBX private IP first.' >&2; exit 1;
-}
+if [ ! -s config/pjsip.conf ] || [ ! -s config/extensions.conf ]; then
+    echo 'Run scripts/configure.py with the PBX private IP first.' >&2
+    exit 1
+fi
 exec docker run -d --name private-asterisk --network host \
     --restart unless-stopped --stop-timeout 30 \
     --read-only --cap-drop ALL --security-opt no-new-privileges:true \
