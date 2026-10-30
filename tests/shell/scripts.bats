@@ -76,6 +76,13 @@ MOCK
 
 @test "image test cleans up after Docker startup failure without touching deployment files" {
     cp "$PROJECT_ROOT/scripts/test-image.sh" "$PROJECT_ROOT/scripts/configure.py" "$TEST_PROJECT/scripts/"
+    for config in "$PROJECT_ROOT"/config/*.conf; do
+        case "$config" in */pjsip.conf|*/extensions.conf|*local*.conf) continue ;; esac
+        cp "$config" "$TEST_PROJECT/config/"
+    done
+    printf 'private local dialplan\n' > "$TEST_PROJECT/config/music-local.conf"
+    mkdir "$TEST_PROJECT/config/media"
+    printf 'private audio\n' > "$TEST_PROJECT/config/media/test.sln16"
     printf 'real deployment credential\n' > "$TEST_PROJECT/config/pjsip.conf"
     printf 'real dialplan\n' > "$TEST_PROJECT/config/extensions.conf"
     cat > "$BATS_TEST_TMPDIR/bin/docker" <<'MOCK'
@@ -96,5 +103,8 @@ MOCK
     # Failed integration runs deliberately retain their temporary diagnostics.
     retained=$(printf '%s\n' "$output" | sed -n 's/^Test files and log retained at //p')
     [ -d "$retained" ]
+    [ -f "$retained/config/modules.conf" ]
+    [ ! -e "$retained/config/music-local.conf" ]
+    [ ! -e "$retained/config/media" ]
     rm -rf "$retained"
 }

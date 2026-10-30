@@ -57,3 +57,15 @@ __pycache__/
 
 # Private deployment snapshots and immutable release metadata
 /releases/
+
+# Optional local test audio
+/config/media/
+*.sln
+*.sln[0-9]*
+*.ulaw
+*.alaw
+*.g722
+*.mp3
+*.flac
+*.ogg
+*.opus

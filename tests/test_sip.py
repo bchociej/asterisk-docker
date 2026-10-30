@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-"""Authenticate both test extensions over SIP; reject a wrong password."""
+"""Authenticate test accounts and validate RTP echo or optional local playback."""
 
 import hashlib
+import os
 import re
 import secrets
 import socket
@@ -83,15 +84,23 @@ def test_registration_and_rtp_echo(pbx):
 
     # Exercise the actual SIP/SDP/RTP path, not just configuration parsing.
     user, password = accounts[0]
+    endpoint = re.search(
+        rf"\[{re.escape(user)}\]\(phone\)(.*?)(?=\n\[)", Path(config).read_text(), re.S
+    )
+    wideband = bool(endpoint and "allow = g722" in endpoint.group(1))
+    payload_type = 9 if wideband else 0
+    codec = "G722" if wideband else "PCMU"
     call_id, tag = secrets.token_hex(12), secrets.token_hex(6)
-    uri = f"sip:6000@{host}"
+    extension = os.environ.get("ASTERISK_TEST_EXTENSION", "6000")
+    assert extension in ("6000", "6001", "6002")
+    uri = f"sip:{extension}@{host}"
     rtp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     rtp.bind((local_ip, 0))
     rtp_port = rtp.getsockname()[1]
     sdp = (
         f"v=0\r\no=test 1 1 IN IP4 {local_ip}\r\ns=Echo test\r\n"
-        f"c=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {rtp_port} RTP/AVP 0 101\r\n"
-        "a=rtpmap:0 PCMU/8000\r\na=rtpmap:101 telephone-event/8000\r\n"
+        f"c=IN IP4 {local_ip}\r\nt=0 0\r\nm=audio {rtp_port} RTP/AVP {payload_type} 101\r\n"
+        f"a=rtpmap:{payload_type} {codec}/8000\r\na=rtpmap:101 telephone-event/8000\r\n"
         "a=fmtp:101 0-16\r\na=sendrecv\r\n"
     )
 
@@ -167,12 +176,17 @@ def test_registration_and_rtp_echo(pbx):
     received = 0
     for sequence in range(60):
         packet = (
-            struct.pack("!BBHII", 0x80, 0, sequence, sequence * 160, 12345) + payload
+            struct.pack("!BBHII", 0x80, payload_type, sequence, sequence * 160, 12345)
+            + payload
         )
         rtp.sendto(packet, (media_ip, media_port))
         try:
             echoed, _ = rtp.recvfrom(2048)
-            if echoed[12:] == payload:
+            if (extension == "6000" and echoed[12:] == payload) or (
+                extension != "6000"
+                and len(echoed) > 12
+                and echoed[1] & 0x7F == payload_type
+            ):
                 received += 1
         except TimeoutError:
             pass
@@ -180,7 +194,8 @@ def test_registration_and_rtp_echo(pbx):
     in_dialog("BYE", 3)
     rtp.close()
     sock.close()
+    mode = "echo" if extension == "6000" else "playback"
     assert received >= 5, (
-        f"Expected echoed PCMU audio; received {received} matching packets"
+        f"Expected {codec} {mode} audio; received {received} matching packets"
     )
-    print(f"PASS: authenticated echo call and PCMU RTP round trip ({received} packets)")
+    print(f"PASS: authenticated {mode} call and {codec} RTP ({received} packets)")

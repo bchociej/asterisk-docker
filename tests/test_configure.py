@@ -59,6 +59,8 @@ def test_reject_invalid_bind_without_writing_files(project, address):
     [
         ("1001", "1001"),
         ("6000",),
+        ("6001",),
+        ("6002",),
         ("123",),
         ("abcd",),
         ("１２３４",),
@@ -241,3 +243,15 @@ def test_concurrent_adds_do_not_drop_devices_or_passwords(project):
         assert process.returncode == 0, error
     inventory, passwords = read_state(project)
     assert set(inventory["devices"]) == set(passwords) == {"kitchen", "office"}
+
+
+def test_codec_change_preserves_credentials(project):
+    assert configure(project, "init", "--bind", "192.168.50.10").returncode == 0
+    assert configure(project, "add", "studio", "--extension", "1001").returncode == 0
+    before = (project / "secrets/phones.json").read_bytes()
+    assert configure(project, "update", "studio", "--codec", "g722").returncode == 0
+    assert configure(project, "render").returncode == 0
+    config = (project / "config/pjsip.conf").read_text()
+    assert "[phone-studio](phone)\ndisallow = all\nallow = g722\n" in config
+    assert (project / "secrets/phones.json").read_bytes() == before
+    assert configure(project, "update", "studio", "--codec", "invalid").returncode != 0

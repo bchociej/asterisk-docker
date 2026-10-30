@@ -40,8 +40,11 @@ if [ -n "$snapshot" ]; then
     docker exec "$name-net" ip address add "$bind_ip/32" dev lo
     network="container:$name-net"
 else
-    cp -R config "$config_dir/config"
-    rm -f "$config_dir/config/pjsip.conf" "$config_dir/config/extensions.conf"
+    # Copy only public defaults; local dialplans/audio never enter generic tests.
+    mkdir "$config_dir/config"
+    for file in acl ari asterisk ccss cdr cel features http indications logger manager modules pjproject rtp stasis udptl; do
+        cp "config/$file.conf" "$config_dir/config/"
+    done
     cp scripts/configure.py "$config_dir/scripts/configure.py"
     python3 "$config_dir/scripts/configure.py" init --bind 192.168.250.1
     python3 "$config_dir/scripts/configure.py" add test-a --extension 1001
@@ -84,6 +87,7 @@ if [ -n "$snapshot" ]; then
     docker run --rm --network "$network" --read-only --cap-drop ALL \
         --security-opt no-new-privileges:true --user "$(id -u):$(id -g)" \
         --tmpfs /tmp --env PYTHONPATH=/deps --env PYTHONDONTWRITEBYTECODE=1 \
+        --env "ASTERISK_TEST_EXTENSION=${ASTERISK_TEST_EXTENSION:-6000}" \
         --mount "type=bind,src=$dependencies,dst=/deps,readonly" \
         --mount "type=bind,src=$(pwd),dst=/repo,readonly" \
         --mount "type=bind,src=$config_dir/config/pjsip.conf,dst=/pjsip.conf,readonly" \

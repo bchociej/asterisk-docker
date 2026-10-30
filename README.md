@@ -228,6 +228,24 @@ backups and paired rollback, follow [deployment instructions](docs/deployment.md
 No production deployment, Kubernetes support or image publication is implied.
 Install uv using the [official instructions](https://docs.astral.sh/uv/getting-started/installation/).
 
+## Audio codecs and local playback
+
+Per-phone codec selection is optional and defaults to `ulaw` (PCMU); `g722` is
+also supported. Use `python3 scripts/configure.py update DEVICE --codec g722`,
+then render and validate a new snapshot before activation. Set the
+ATA to the same codec; `--codec ulaw` restores PCMU. Codec changes preserve SIP
+credentials. G.722 support does not guarantee wider audible bandwidth through
+an analog handset.
+
+The image includes optional `Playback` and signed-linear file support for local
+listening tests. Generated dialplans accept an optional `music-local.conf` include;
+local audio under `config/media/` and local dialplan files are ignored by Git and
+excluded from the image build. Include them in a validated private release
+snapshot to use them. Keep track attribution beside any licensed test audio.
+
+See [audio codec testing](docs/audio-testing.md) for setup, source requirements,
+and comparison/rollback guidance.
+
 ## Applied standards
 
 Standards source: [bchociej/dev-standards](https://github.com/bchociej/dev-standards).
